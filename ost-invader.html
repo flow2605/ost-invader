@@ -1,0 +1,1394 @@
+﻿<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>Ost Invader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #050505;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Inter', 'Helvetica Now', Helvetica, Arial, sans-serif;
+    }
+    canvas {
+      display: block;
+      image-rendering: pixelated;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" width="500" height="700"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width;
+const H = canvas.height;
+
+// ---- Sprite images ----
+const schwalbeImg = new Image();
+const vespaImg    = new Image();
+const florettImg  = new Image();
+const ks50Img     = new Image();
+const kaeferImg   = new Image();
+const mapImg      = new Image();
+schwalbeImg.src = 'schwalbe.png';
+vespaImg.src    = 'vespa.png';
+florettImg.src  = 'florett.png';
+ks50Img.src     = 'ks50.png';
+kaeferImg.src   = 'kaefer.png';
+mapImg.src      = 'map.png';
+
+// ---- Minimap: Stadtkoordinaten als Bruchteil der Bildgrosse ----
+// Werte geschätzt anhand der Punktpositionen auf map.png
+const CITY_MAP_POS = {
+  'Ost-Berlin':                 [0.67, 0.42],
+  'Potsdam':                    [0.53, 0.48],
+  'Frankfurt (Oder)':           [0.80, 0.48],
+  'Eisenhüttenstadt':           [0.76, 0.56],
+  'Cottbus':                    [0.74, 0.65],
+  'Dresden':                    [0.68, 0.74],
+  'Chemnitz / Karl-Marx-Stadt': [0.49, 0.82],
+  'Zwickau':                    [0.36, 0.80],
+  'Gera':                       [0.26, 0.70],
+  'Leipzig':                    [0.30, 0.61],
+  'Halle (Saale)':              [0.27, 0.52],
+  'Magdeburg':                  [0.24, 0.37],
+  'Schwerin':                   [0.17, 0.24],
+  'Rostock':                    [0.50, 0.09],
+  'Neubrandenburg':             [0.72, 0.20],
+};
+
+const MM_X = 8, MM_Y = 8;    // Position oben links
+const MM_W = 118, MM_H = 126; // Grosse der Minimap
+
+// ---- Enemy types ----
+// type, img, w, h, speedMult, points, hits, minLevel, weight
+const ENEMY_TYPES = [
+  { type: 'vespa',   img: () => vespaImg,   w: 48, h: 76, speedMult: 1.0, points: 10, hits: 1, minLevel: 1, weight: 6 },
+  { type: 'florett', img: () => florettImg, w: 32, h: 52, speedMult: 1.4, points: 15, hits: 1, minLevel: 3, weight: 5 },
+  { type: 'ks50',    img: () => ks50Img,    w: 36, h: 58, speedMult: 1.1, points: 20, hits: 1, minLevel: 5, weight: 4 },
+  { type: 'kaefer',  img: () => kaeferImg,  w: 64, h: 44, speedMult: 0.6, points: 40, hits: 2, minLevel: 7, weight: 2 },
+];
+
+// ---- Design tokens ----
+const C = {
+  gold:   '#e4b854',
+  bg:     '#282828',
+  light:  '#e4e4e4',
+  black:  '#050505',
+  mid:    '#505050',
+  dim:    '#383838',
+};
+
+// ---- State ----
+let state = 'start'; // 'start' | 'playing' | 'paused' | 'over'
+let score = 0;
+let highScore = 0;
+
+const player = {
+  x: W / 2 - 20,
+  y: H - 90,
+  w: 40,
+  h: 65,
+  speed: 320,
+  lives: 3,
+  lastShot: 0,
+  shotCooldown: 280,
+  invincible: 0,
+};
+
+let bullets = [];
+let enemies = [];
+let particles = [];
+
+let roadMarks = [];
+for (let i = 0; i < 12; i++) roadMarks.push({ y: i * 65 });
+
+let spawnTimer = 0;
+let spawnInterval = 2400;
+let enemyBaseSpeed = 120;
+let diffTimer = 0;
+
+// ---- Level / Ortsschild ----
+const eastGermanCities = [
+  'Ost-Berlin',
+  'Potsdam',
+  'Frankfurt (Oder)',
+  'Eisenh\u00fcttenstadt',
+  'Cottbus',
+  'Dresden',
+  'Chemnitz / Karl-Marx-Stadt',
+  'Zwickau',
+  'Gera',
+  'Leipzig',
+  'Halle (Saale)',
+  'Magdeburg',
+  'Schwerin',
+  'Rostock',
+  'Neubrandenburg',
+];
+let currentLevel = 1;
+let currentCity  = '';
+const SIGN_H     = 58;
+let sign = { active: false, city: '', sw: 0, x: 0, y: 0, phase: 'idle', phaseTimer: 0 };
+
+// ---- Power-ups ----
+let powerups          = [];
+let powerupSpawnTimer = 0;
+const POWERUP_INTERVAL = 8500;  // alle ~8.5s spawnt ein Power-up
+let speedBoostTimer   = 0;      // ms verbleibend (Mid50)
+let akkuCount         = 0;      // aktive Zusatzakkus
+let akkuTimer         = 0;      // ms verbleibend (Zusatzakku)
+
+// ---- Runden-Bonus ----
+let roundBonus   = null;  // { round, timer, totalTime }
+let elektroBonus = null;  // { count, timer, totalTime }
+let elektroCount = 0;  // elektrifizierte Fahrzeuge diese Runde
+
+// ---- Eindringling ----
+let eindringlingMessages = [];  // { x, y, timer, alpha }
+
+// ---- Game-Over-Sprüche ----
+const GAME_OVER_QUOTES = [
+  'Der Osten braucht dich nicht mehr.',
+  'Du wirst in den Akten verschwinden.',
+  'Fünfjahresplan: nicht erfüllt.',
+  'Rente auf unbestimmte Zeit.',
+  'Die Partei dankt für deinen Einsatz.',
+  'Der Westen hat gewonnen. Diesmal.',
+  'Umschulung zum Kapitalisten.',
+  'Genosse, das war nix.',
+  'Held der Arbeit? Eher nicht.',
+  'Für den Sozialismus zu langsam.',
+  'Schönen Gruß vom Klassenfeind!',
+];
+let gameOverQuote = '';
+
+// ---- Elektro-Schuss ----
+let chargeStart = null;         // Timestamp wann Space gedrückt wurde
+const CHARGE_TIME = 600;        // ms bis Elektro-Schuss bereit
+
+// ---- Audio ----
+const bgm = new Audio('bgm.mp3');
+bgm.loop = true;
+bgm.volume = 0.5;
+function bgmPlay()  { bgm.play().catch(() => {}); }
+function bgmPause() { bgm.pause(); }
+
+// ---- Input ----
+const keys = {};
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space' && state === 'start') { startGame(); return; }
+  if (e.code === 'Enter' && state === 'over')  { startGame(); return; }
+  if (e.code === 'KeyP' && state === 'playing') { state = 'paused'; bgmPause(); }
+  else if (e.code === 'KeyP' && state === 'paused') { state = 'playing'; bgmPlay(); }
+  if (e.code === 'Space') e.preventDefault();
+  if (e.code === 'KeyP')  e.preventDefault();
+});
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && state === 'playing' && chargeStart === null) {
+    chargeStart = performance.now();
+  }
+});
+document.addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (e.code === 'Space' && state === 'playing' && chargeStart !== null) {
+    const held = performance.now() - chargeStart;
+    chargeStart = null;
+    if (held >= CHARGE_TIME) {
+      // Elektro-Schuss
+      const cx = player.x + player.w / 2 - 7;
+      bullets.push({ x: cx, y: player.y, w: 14, h: 28, electro: true });
+    } else {
+      // Normaler Schuss beim Loslassen
+      const totalBolts = akkuCount + 1;
+      const spread = 18;
+      const boltX0 = player.x + player.w / 2 - ((totalBolts - 1) * spread) / 2 - 5;
+      for (let b = 0; b < totalBolts; b++)
+        bullets.push({ x: boltX0 + b * spread, y: player.y, w: 10, h: 22, electro: false });
+    }
+  }
+});
+
+
+function startGame() {
+  state = 'playing';
+  score = 0;
+  player.x = W / 2 - player.w / 2;
+  player.y = H - 90;
+  player.lives = 3;
+  player.invincible = 0;
+  player.lastShot = 0;
+  bullets = [];
+  enemies = [];
+  particles = [];
+  spawnTimer = 0;
+  spawnInterval = 2400;
+  enemyBaseSpeed = 120;
+  diffTimer = 0;
+  lastTime = 0;
+  currentLevel = 1;
+  currentCity  = 'Ost-Berlin';
+  sign.active  = false;
+  sign.phase   = 'idle';
+  powerups          = [];
+  powerupSpawnTimer = 0;
+  speedBoostTimer   = 0;
+  akkuCount         = 0;
+  akkuTimer         = 0;
+  eindringlingMessages        = [];
+  roundBonus                  = null;
+  elektroBonus                = null;
+  elektroCount                = 0;
+  chargeStart                 = null;
+  bgmPlay();
+}
+
+// ---- Collision ----
+function collides(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x &&
+         a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function easeOut(t) { return 1 - (1 - t) ** 3; }
+
+function wrapText(text, x, y, maxWidth, lineHeight) {
+  const words = text.split(' ');
+  let line = '';
+  for (let i = 0; i < words.length; i++) {
+    const test = line + (line ? ' ' : '') + words[i];
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      line = words[i];
+      y += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, y);
+  return y; // gibt die letzte Y-Position zurück
+}
+function easeIn(t)  { return t * t * t; }
+
+
+// ---- Spawn ----
+function pickEnemyType() {
+  const available = ENEMY_TYPES.filter(t => t.minLevel <= currentLevel);
+  const totalWeight = available.reduce((s, t) => s + t.weight, 0);
+  let r = Math.random() * totalWeight;
+  for (const t of available) { r -= t.weight; if (r <= 0) return t; }
+  return available[available.length - 1];
+}
+
+function spawnEnemy() {
+  const def = pickEnemyType();
+  const margin = 30;
+  const x = margin + Math.random() * (W - 2 * margin - def.w);
+  const zigzag = def.type === 'ks50' ? { amp: 60, freq: 1.8, offset: Math.random() * Math.PI * 2 } : null;
+  enemies.push({
+    x, y: -def.h - 10,
+    w: def.w, h: def.h,
+    speed: (enemyBaseSpeed + Math.random() * 60) * def.speedMult,
+    type: def.type,
+    img: def.img,
+    points: def.points,
+    hitsLeft: def.hits,
+    startX: x,
+    zigzag,
+    age: 0,
+  });
+}
+
+function spawnParticles(cx, cy, color) {
+  for (let i = 0; i < 10; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const spd = 60 + Math.random() * 100;
+    particles.push({
+      x: cx, y: cy,
+      vx: Math.cos(angle) * spd,
+      vy: Math.sin(angle) * spd,
+      life: 1,
+      size: 3 + Math.random() * 4,
+      color,
+    });
+  }
+}
+
+// ---- Update ----
+let lastTime = 0;
+
+function update(ts) {
+  if (state !== 'playing') { lastTime = ts; return; }
+  const dt = Math.min((ts - lastTime) / 1000, 0.05);
+  lastTime = ts;
+
+  diffTimer += dt * 1000;
+  if (diffTimer >= 15000) {
+    diffTimer = 0;
+    spawnInterval = Math.max(650, spawnInterval - 150);
+    enemyBaseSpeed = Math.min(380, enemyBaseSpeed + 14);
+  }
+
+  // ---- Level check ----
+  const newLevel = Math.floor(score / 50) + 1;
+  if (newLevel > currentLevel) {
+    currentLevel = newLevel;
+    const cityIdx = (currentLevel - 1) % eastGermanCities.length;
+    const city = eastGermanCities[cityIdx];
+    currentCity = city;
+    ctx.font = 'bold 18px Inter, Arial, sans-serif';
+    const sw = Math.max(128, ctx.measureText(city).width + 50);
+    sign = { active: true, city, sw, x: W - sw - 14, y: -SIGN_H - 10 };
+
+    // Runde komplett wenn wir wieder bei Ost-Berlin landen (ausser Runde 1)
+    if (cityIdx === 0 && currentLevel > 1) {
+      const round = Math.floor((currentLevel - 1) / eastGermanCities.length);
+      player.lives = Math.min(player.lives + 1, 5);
+      roundBonus = { round, timer: 3200, totalTime: 3200 };
+    }
+  }
+
+  // ---- Sign scrollt mit Strassengeschwindigkeit (wie Road-Marks) ----
+  if (sign.active) {
+    sign.y += 220 * dt;
+    if (sign.y > H + 50) sign.active = false;
+  }
+
+  // ---- Power-up Spawn ----
+  powerupSpawnTimer += dt * 1000;
+  if (powerupSpawnTimer >= POWERUP_INTERVAL) {
+    powerupSpawnTimer = 0;
+    const margin = 40;
+    const type = Math.random() < 0.5 ? 'mid50' : 'akku';
+    const pw = 20;
+    const ph = 28;
+    powerups.push({ x: margin + Math.random() * (W - 2 * margin - pw), y: -(ph + 10), w: pw, h: ph, type });
+  }
+
+  // ---- Power-up Bewegung + Einsammeln ----
+  powerups = powerups.filter(p => {
+    p.y += 160 * dt;
+    if (collides(p, player)) {
+      if (p.type === 'mid50') {
+        speedBoostTimer = 10000;
+      } else {
+        akkuCount++;
+        akkuTimer = 10000;
+      }
+      spawnParticles(p.x + p.w / 2, p.y + p.h / 2,
+        p.type === 'mid50' ? C.gold : '#4dd9ff');
+      return false;
+    }
+    return p.y < H + 10;
+  });
+
+  // ---- Effekt-Timer ----
+  if (speedBoostTimer > 0) {
+    speedBoostTimer -= dt * 1000;
+    if (speedBoostTimer <= 0) speedBoostTimer = 0;
+  }
+  if (akkuTimer > 0) {
+    akkuTimer -= dt * 1000;
+    if (akkuTimer <= 0) { akkuTimer = 0; akkuCount = 0; }
+  }
+
+  eindringlingMessages = eindringlingMessages.filter(m => {
+    m.timer -= dt * 1000;
+    return m.timer > 0;
+  });
+
+  if (roundBonus) {
+    roundBonus.timer -= dt * 1000;
+    if (roundBonus.timer <= 0) roundBonus = null;
+  }
+  if (elektroBonus) {
+    elektroBonus.timer -= dt * 1000;
+    if (elektroBonus.timer <= 0) elektroBonus = null;
+  }
+
+  const curSpd = speedBoostTimer > 0 ? player.speed * 1.65 : player.speed;
+  if (keys['ArrowLeft']  || keys['KeyA']) player.x -= curSpd * dt;
+  if (keys['ArrowRight'] || keys['KeyD']) player.x += curSpd * dt;
+  if (keys['ArrowUp']    || keys['KeyW']) player.y -= curSpd * dt;
+  if (keys['ArrowDown']  || keys['KeyS']) player.y += curSpd * dt;
+  player.x = Math.max(0, Math.min(W - player.w, player.x));
+  player.y = Math.max(0, Math.min(H - player.h, player.y));
+
+  bullets = bullets.filter(b => { b.y -= 580 * dt; return b.y + b.h > 0; });
+
+  spawnTimer += dt * 1000;
+  if (spawnTimer >= spawnInterval) {
+    spawnTimer = 0;
+    spawnEnemy();
+    if (spawnInterval < 900) spawnEnemy();
+  }
+
+  enemies = enemies.filter(e => {
+    e.age += dt;
+    e.y += e.speed * dt;
+    if (e.zigzag) {
+      e.x = e.startX + Math.sin(e.age * e.zigzag.freq + e.zigzag.offset) * e.zigzag.amp;
+      e.x = Math.max(10, Math.min(W - e.w - 10, e.x));
+    }
+    for (let i = bullets.length - 1; i >= 0; i--) {
+      if (collides(bullets[i], e)) {
+        const isElectro = bullets[i].electro;
+        bullets.splice(i, 1);
+        if (isElectro && !e.electrified) {
+          // Elektrifizieren
+          e.electrified = true;
+          spawnParticles(e.x + e.w / 2, e.y + e.h / 2, '#4dd9ff');
+          return true;
+        }
+        e.hitsLeft--;
+        spawnParticles(e.x + e.w / 2, e.y + e.h / 2, e.hitsLeft > 0 ? C.gold : C.light);
+        if (e.hitsLeft > 0) return true;
+        score += e.points;
+        return false;
+      }
+    }
+    if (e.y > H) {
+      if (e.electrified) {
+        // Elektrifiziertes Moped eingefahren = Bonus!
+        const bonus = e.points * 3;
+        score += bonus;
+        elektroCount++;
+        eindringlingMessages.push({ x: e.x + e.w / 2, timer: 1800, type: e.type, elektro: true, bonus });
+        if (elektroCount % 5 === 0) {
+          player.lives = Math.min(player.lives + 1, 5);
+          elektroBonus = { count: elektroCount, timer: 3200, totalTime: 3200 };
+        }
+      } else {
+        eindringlingMessages.push({ x: e.x + e.w / 2, timer: 1800, type: e.type });
+        loseLife();
+      }
+      return false;
+    }
+    if (player.invincible <= 0 && collides(e, player)) {
+      spawnParticles(e.x + e.w / 2, e.y + e.h / 2, C.gold);
+      loseLife();
+      return false;
+    }
+    return true;
+  });
+
+  if (player.invincible > 0) player.invincible -= dt * 1000;
+
+  particles = particles.filter(p => {
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vy += 80 * dt;
+    p.life -= dt * 2.2;
+    return p.life > 0;
+  });
+
+  roadMarks.forEach(r => {
+    r.y += 220 * dt;
+    if (r.y > H + 10) r.y -= H + 80;
+  });
+}
+
+function loseLife() {
+  if (player.invincible > 0) return;
+  player.lives--;
+  player.invincible = 2200;
+  spawnParticles(player.x + player.w / 2, player.y + player.h / 2, C.gold);
+  if (player.lives <= 0) {
+    if (score > highScore) highScore = score;
+    gameOverQuote = GAME_OVER_QUOTES[Math.floor(Math.random() * GAME_OVER_QUOTES.length)];
+    state = 'over';
+    bgmPause();
+  }
+}
+
+// ---- Sprites ----
+
+const SW = 45; // sprite width
+const SH = 63; // sprite height
+
+function drawSchwalbe(x, y, alpha) {
+  ctx.globalAlpha = alpha ?? 1;
+  ctx.drawImage(schwalbeImg, x - 8, y - 5, SW, SH);
+  ctx.globalAlpha = 1;
+}
+
+function drawEnemy(e) {
+  ctx.save();
+  const cx = e.x + e.w / 2;
+  const cy = e.y + e.h / 2;
+  ctx.translate(cx, cy);
+  if (e.type !== 'kaefer') ctx.scale(1, -1);
+
+  // Elektrifiziert: blauer Glow
+  if (e.electrified) {
+    ctx.shadowColor = '#4dd9ff';
+    ctx.shadowBlur  = 16 + 8 * Math.sin(Date.now() / 120);
+  }
+  ctx.drawImage(e.img(), -e.w / 2, -e.h / 2, e.w, e.h);
+  ctx.shadowBlur = 0;
+
+  // Elektrifiziert: blauer Overlay + ⚡
+  if (e.electrified) {
+    ctx.globalAlpha = 0.25 + 0.1 * Math.sin(Date.now() / 120);
+    ctx.fillStyle = '#4dd9ff';
+    ctx.fillRect(-e.w / 2, -e.h / 2, e.w, e.h);
+    ctx.globalAlpha = 1;
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('⚡', 0, 0);
+    ctx.textBaseline = 'alphabetic';
+  }
+
+  // Käfer: 1 Treffer erhalten = rot blinken
+  if (e.type === 'kaefer' && e.hitsLeft === 1 && !e.electrified) {
+    ctx.globalAlpha = 0.35 + 0.3 * Math.sin(Date.now() / 80);
+    ctx.fillStyle = '#ff4444';
+    ctx.fillRect(-e.w / 2, -e.h / 2, e.w, e.h);
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+}
+
+function drawBolt(x, y, w, h, electro) {
+  const col = electro ? '#4dd9ff' : C.gold;
+  ctx.shadowColor = col;
+  ctx.shadowBlur = electro ? 16 : 10;
+  ctx.fillStyle = col;
+  ctx.beginPath();
+  ctx.moveTo(x + w * 0.70, y);
+  ctx.lineTo(x + w * 0.20, y + h * 0.48);
+  ctx.lineTo(x + w * 0.55, y + h * 0.48);
+  ctx.lineTo(x + w * 0.05, y + h);
+  ctx.lineTo(x + w * 0.80, y + h * 0.52);
+  ctx.lineTo(x + w * 0.45, y + h * 0.52);
+  ctx.lineTo(x + w,        y);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+}
+
+// ---- Ortsschild ----
+function drawOrtsschild(x, y, city, sw) {
+  ctx.save();
+  const sh = SIGN_H;
+
+  // Mast
+  ctx.fillStyle = '#6a6a6a';
+  ctx.fillRect(x + sw / 2 - 2, y + sh, 5, 34);
+
+  // Schatten
+  ctx.shadowColor   = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur    = 10;
+  ctx.shadowOffsetX = 3;
+  ctx.shadowOffsetY = 5;
+
+  // Gelber Grund
+  ctx.fillStyle = '#f5c800';
+  ctx.fillRect(x, y, sw, sh);
+  ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0;
+
+  // Aussenrahmen
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 3;
+  ctx.strokeRect(x + 2, y + 2, sw - 4, sh - 4);
+
+  // Innenrahmen
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 1.5;
+  ctx.strokeRect(x + 6, y + 6, sw - 12, sh - 12);
+
+  // Ortsname zentriert
+  ctx.fillStyle = '#111';
+  ctx.font = 'bold 19px Inter, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(city, x + sw / 2, y + sh / 2 + 7);
+
+  ctx.restore();
+}
+
+// ---- Power-up zeichnen ----
+function drawPowerup(p) {
+  if (p.type === 'mid50') drawMotorPowerup(p);
+  else                    drawBatteryPowerup(p);
+}
+
+function drawBatteryPowerup(p) {
+  const { x, y, w, h } = p;
+  const col   = '#4dd9ff';
+  const termW = Math.round(w * 0.45);
+  const termH = 3;
+  const bodyY = y + termH;
+  const bodyH = h - termH;
+
+  ctx.save();
+
+  // Plus-Terminal
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 6;
+  ctx.fillStyle   = col;
+  ctx.beginPath();
+  ctx.roundRect(x + w / 2 - termW / 2, y, termW, termH, 1);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // Korper-Hintergrund
+  ctx.fillStyle = '#071820';
+  ctx.beginPath();
+  ctx.roundRect(x, bodyY, w, bodyH, 3);
+  ctx.fill();
+
+  // Fullstand (75%, von unten)
+  const fillH = (bodyH - 4) * 0.75;
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(x + 2, bodyY + 2, w - 4, bodyH - 4, 2);
+  ctx.clip();
+  const grad = ctx.createLinearGradient(x, bodyY + bodyH, x, bodyY);
+  grad.addColorStop(0,   col);
+  grad.addColorStop(0.7, col + 'bb');
+  grad.addColorStop(1,   col + '33');
+  ctx.fillStyle = grad;
+  ctx.fillRect(x + 2, bodyY + bodyH - 2 - fillH, w - 4, fillH);
+  ctx.restore();
+
+  // Zell-Trennlinien (2 Linien = 3 Zellen)
+  ctx.strokeStyle = '#ffffff33';
+  ctx.lineWidth   = 1;
+  for (let i = 1; i <= 2; i++) {
+    const ly = bodyY + (bodyH / 3) * i;
+    ctx.beginPath();
+    ctx.moveTo(x + 3, ly);
+    ctx.lineTo(x + w - 3, ly);
+    ctx.stroke();
+  }
+
+  // Aussenrand + Glow
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 8;
+  ctx.strokeStyle = col;
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(x, bodyY, w, bodyH, 3);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Blitz (skaliert auf kleine Grosse)
+  const bw = w - 6, bh = bodyH - 6;
+  const bx = x + 3, by = bodyY + 3;
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 4;
+  ctx.fillStyle   = '#ffffffcc';
+  ctx.beginPath();
+  ctx.moveTo(bx + bw * 0.65, by);
+  ctx.lineTo(bx + bw * 0.20, by + bh * 0.50);
+  ctx.lineTo(bx + bw * 0.50, by + bh * 0.50);
+  ctx.lineTo(bx + bw * 0.05, by + bh);
+  ctx.lineTo(bx + bw * 0.80, by + bh * 0.50);
+  ctx.lineTo(bx + bw * 0.50, by + bh * 0.50);
+  ctx.lineTo(bx + bw,        by);
+  ctx.closePath();
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.restore();
+}
+
+function drawMotorPowerup(p) {
+  // Stirnansicht (Querschnitt): Aussenring + 3 Statorpole + Rotor + Welle
+  const col = C.gold;
+  const cx  = p.x + p.w / 2;
+  const cy  = p.y + p.h / 2;
+  const R   = Math.min(p.w, p.h) / 2 - 1;
+  const rr  = R * 0.30;
+
+  ctx.save();
+
+  // Gehause-Hintergrund
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 10;
+  ctx.fillStyle   = '#1a1208';
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  // 3 Statorpole (von Aussenring nach innen zeigend)
+  const poleLen = R * 0.52;
+  const shoeW   = 5;
+  const stemW   = 3;
+  for (let i = 0; i < 3; i++) {
+    const angle = (i / 3) * Math.PI * 2 - Math.PI / 2;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(angle);
+    ctx.fillStyle = col + 'cc';
+    // Stiel
+    ctx.fillRect(-stemW / 2, -(R - 1), stemW, poleLen - 2);
+    // Polschuh (breiterer Fuss)
+    ctx.fillRect(-shoeW / 2, -(R - 1) + poleLen - 3, shoeW, 4);
+    ctx.restore();
+  }
+
+  // Aussenring mit Glow
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 10;
+  ctx.strokeStyle = col;
+  ctx.lineWidth   = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Rotor
+  ctx.fillStyle = '#2a1e05';
+  ctx.beginPath();
+  ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = col + 'aa';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Wellenmittelpunkt
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 5;
+  ctx.fillStyle   = col;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  ctx.restore();
+}
+
+// ---- Runden-Bonus Einblendung ----
+function drawRoundBonus(rb) {
+  const progress = 1 - rb.timer / rb.totalTime;  // 0 → 1 uber die Gesamtdauer
+
+  // Einblenden (erste 8%), voll sichtbar, Ausblenden (letzte 25%)
+  let alpha;
+  if (progress < 0.08)       alpha = progress / 0.08;
+  else if (progress > 0.75)  alpha = 1 - (progress - 0.75) / 0.25;
+  else                       alpha = 1;
+
+  // Leichtes Hochschweben
+  const cy = H / 2 - 60 - progress * 30;
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, alpha);
+  ctx.textAlign   = 'center';
+
+  // Hintergrund-Pill
+  const pillW = 260, pillH = 80;
+  ctx.fillStyle = 'rgba(5,5,5,0.75)';
+  ctx.beginPath();
+  ctx.roundRect(W / 2 - pillW / 2, cy - 48, pillW, pillH, 10);
+  ctx.fill();
+
+  // Goldener Rahmen mit Glow
+  ctx.shadowColor = C.gold;
+  ctx.shadowBlur  = 20;
+  ctx.strokeStyle = C.gold;
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(W / 2 - pillW / 2, cy - 48, pillW, pillH, 10);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // "RUNDE X KOMPLETT"
+  ctx.shadowColor = C.gold;
+  ctx.shadowBlur  = 12;
+  ctx.font        = font(700, 11);
+  ctx.fillStyle   = C.gold;
+  ctx.letterSpacing = '3px';
+  ctx.fillText('RUNDE ' + rb.round + ' KOMPLETT', W / 2, cy - 20);
+  ctx.letterSpacing = '0px';
+  ctx.shadowBlur = 0;
+
+  // "+1 LEBEN" gross
+  ctx.shadowColor = C.gold;
+  ctx.shadowBlur  = 16;
+  ctx.font        = font(700, 28);
+  ctx.fillStyle   = C.light;
+  ctx.fillText('+1 LEBEN  ⚡', W / 2, cy + 14);
+  ctx.shadowBlur = 0;
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawElektroBonus(eb) {
+  const col      = '#4dd9ff';
+  const progress = 1 - eb.timer / eb.totalTime;
+
+  let alpha;
+  if (progress < 0.08)       alpha = progress / 0.08;
+  else if (progress > 0.75)  alpha = 1 - (progress - 0.75) / 0.25;
+  else                       alpha = 1;
+
+  const cy = H / 2 - 60 - progress * 30;
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, alpha);
+  ctx.textAlign   = 'center';
+
+  // Hintergrund-Pill
+  const pillW = 260, pillH = 80;
+  ctx.fillStyle = 'rgba(5,5,5,0.75)';
+  ctx.beginPath();
+  ctx.roundRect(W / 2 - pillW / 2, cy - 48, pillW, pillH, 10);
+  ctx.fill();
+
+  // Cyan-Rahmen mit Glow
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 20;
+  ctx.strokeStyle = col;
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(W / 2 - pillW / 2, cy - 48, pillW, pillH, 10);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // "5 MOPEDS ELEKTRIFIZIERT"
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 12;
+  ctx.font        = font(700, 11);
+  ctx.fillStyle   = col;
+  ctx.letterSpacing = '3px';
+  ctx.fillText(eb.count + ' MOPEDS ELEKTRIFIZIERT', W / 2, cy - 20);
+  ctx.letterSpacing = '0px';
+  ctx.shadowBlur = 0;
+
+  // "+1 LEBEN"
+  ctx.shadowColor = col;
+  ctx.shadowBlur  = 16;
+  ctx.font        = font(700, 28);
+  ctx.fillStyle   = C.light;
+  ctx.fillText('+1 LEBEN  ⚡', W / 2, cy + 14);
+  ctx.shadowBlur = 0;
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+// ---- Eindringling ----
+function drawEindringling(m) {
+  const progress = 1 - (m.timer / 1800);
+  const alpha    = progress < 0.1 ? progress / 0.1 : 1 - ((progress - 0.1) / 0.9);
+  const y        = H - 60 - progress * 50;
+  const labels   = { vespa: 'VESPA', florett: 'FLORETT', ks50: 'KS 50', kaefer: 'KÄFER' };
+
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, alpha);
+  ctx.textAlign   = 'center';
+
+  if (m.elektro) {
+    // Elektrifiziert: blau + Bonus
+    ctx.shadowColor = '#4dd9ff';
+    ctx.shadowBlur  = 18;
+    ctx.font        = "bold 28px 'Inter', Arial, sans-serif";
+    ctx.fillStyle   = '#4dd9ff';
+    ctx.fillText('⚡ ELEKTRIFIZIERT!', W / 2, y);
+    ctx.shadowBlur  = 0;
+    ctx.font        = "400 11px 'Inter', Arial, sans-serif";
+    ctx.fillStyle   = '#ccc';
+    ctx.letterSpacing = '2px';
+    ctx.fillText((labels[m.type] || '') + '  +' + m.bonus, W / 2, y + 22);
+    ctx.letterSpacing = '0px';
+  } else {
+    // Normaler Eindringling: rot
+    ctx.shadowColor = '#ff2222';
+    ctx.shadowBlur  = 18;
+    ctx.font        = "bold 32px 'Inter', Arial, sans-serif";
+    ctx.fillStyle   = '#ff3333';
+    ctx.fillText('EINDRINGLING!', W / 2, y);
+    ctx.shadowBlur  = 0;
+    ctx.font        = "400 11px 'Inter', Arial, sans-serif";
+    ctx.fillStyle   = '#ccc';
+    ctx.letterSpacing = '2px';
+    ctx.fillText((labels[m.type] || 'EINDRINGLING') + ' IM OSTEN', W / 2, y + 22);
+    ctx.letterSpacing = '0px';
+  }
+
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+// ---- Background ----
+
+function drawBackground() {
+  ctx.fillStyle = C.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Lane edges
+  ctx.strokeStyle = C.mid + '44';
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(22, 0); ctx.lineTo(22, H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(W - 22, 0); ctx.lineTo(W - 22, H); ctx.stroke();
+
+  // Center dashes
+  roadMarks.forEach(r => {
+    ctx.fillStyle = C.mid + '55';
+    ctx.fillRect(W / 2 - 2, r.y, 4, 36);
+  });
+}
+
+// ---- HUD ----
+
+function font(weight, size) {
+  return `${weight} ${size}px 'Inter', Helvetica, Arial, sans-serif`;
+}
+
+function drawHUD() {
+  // Score
+  ctx.textAlign = 'right';
+  ctx.font = font(700, 15);
+  ctx.letterSpacing = '2px';
+  ctx.fillStyle = C.light;
+  ctx.fillText('SCORE  ' + String(score).padStart(5, '0'), W - 18, 28);
+  ctx.letterSpacing = '0px';
+
+  // Ort (unter Score, rechts ausgerichtet)
+  if (currentCity) {
+    ctx.textAlign = 'right';
+    ctx.font = font(700, 15);
+    ctx.letterSpacing = '2px';
+    ctx.fillStyle = C.gold;
+    ctx.fillText(currentCity.toUpperCase(), W - 18, 50);
+    ctx.letterSpacing = '0px';
+  }
+
+  // Lives (zentriert oben)
+  ctx.shadowColor = C.gold;
+  ctx.shadowBlur  = 6;
+  ctx.textAlign   = 'left';
+  ctx.font        = font(400, 16);
+  ctx.fillStyle   = C.gold;
+  const livesStartX = W / 2 - ((player.lives - 1) * 24) / 2 - 10;
+  for (let i = 0; i < player.lives; i++) ctx.fillText('⚡', livesStartX + i * 24, 28);
+  ctx.shadowBlur = 0;
+
+  // Pause hint
+  ctx.textAlign = 'right';
+  ctx.font = font(400, 11);
+  ctx.fillStyle = C.light + 'bb';
+  ctx.fillText('[P] Pause', W - 14, 76);
+
+  // Ladebalken (unten mitte, wenn Space gehalten)
+  if (chargeStart !== null) {
+    const progress = Math.min((performance.now() - chargeStart) / CHARGE_TIME, 1);
+    const bw = 120, bh = 6;
+    const bx = W / 2 - bw / 2, by = H - 22;
+    // Hintergrund
+    ctx.fillStyle = '#ffffff22';
+    ctx.beginPath(); ctx.roundRect(bx, by, bw, bh, 3); ctx.fill();
+    // Füllstand
+    const col = progress >= 1 ? '#4dd9ff' : C.gold;
+    ctx.shadowColor = col; ctx.shadowBlur = progress >= 1 ? 10 : 4;
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.roundRect(bx, by, bw * progress, bh, 3); ctx.fill();
+    ctx.shadowBlur = 0;
+    // Label
+    ctx.textAlign = 'center';
+    ctx.font = font(700, 10);
+    ctx.fillStyle = progress >= 1 ? '#4dd9ff' : C.light + '99';
+    ctx.letterSpacing = '2px';
+    ctx.fillText(progress >= 1 ? '⚡ LOSLASSEN' : 'LADEN...', W / 2, by - 6);
+    ctx.letterSpacing = '0px';
+  }
+
+  // ---- Aktive Effekte (unten links) ----
+  let pillX = 14;
+  if (speedBoostTimer > 0) {
+    const secs = Math.ceil(speedBoostTimer / 1000);
+    ctx.fillStyle   = 'rgba(228,184,84,0.18)';
+    ctx.strokeStyle = C.gold; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(pillX, H - 38, 74, 22, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = C.gold;
+    ctx.font = font(700, 11); ctx.textAlign = 'left';
+    ctx.letterSpacing = '0px';
+    ctx.fillText('M50  ' + secs + 's', pillX + 7, H - 22);
+    pillX += 82;
+  }
+  if (akkuTimer > 0) {
+    const secs = Math.ceil(akkuTimer / 1000);
+    ctx.fillStyle   = 'rgba(77,217,255,0.18)';
+    ctx.strokeStyle = '#4dd9ff'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(pillX, H - 38, 88, 22, 4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#4dd9ff';
+    ctx.font = font(700, 11); ctx.textAlign = 'left';
+    ctx.letterSpacing = '0px';
+    ctx.fillText('⚡x' + (akkuCount + 1) + '  ' + secs + 's', pillX + 7, H - 22);
+  }
+}
+
+// ---- Overlays ----
+
+function drawStartScreen() {
+  ctx.fillStyle = C.black;
+  ctx.fillRect(0, 0, W, H);
+
+  // ---- Titel-Block ----
+  ctx.textAlign = 'center';
+
+  ctx.font = font(700, 72);
+  ctx.fillStyle = C.gold;
+  ctx.shadowColor = C.gold;
+  ctx.shadowBlur  = 28;
+  ctx.fillText('OST', W / 2, 130);
+  ctx.shadowBlur = 0;
+
+  ctx.font = font(700, 72);
+  ctx.fillStyle = C.light;
+  ctx.fillText('INVADER', W / 2, 210);
+
+  // Trennlinie
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(60, 228, W - 120, 2);
+
+  // ---- Tagline ----
+  ctx.font = font(400, 15);
+  ctx.fillStyle = C.light + 'cc';
+  ctx.fillText('Verteidige den Osten!', W / 2, 268);
+  ctx.font = font(400, 13);
+  ctx.fillStyle = C.light + '77';
+  ctx.fillText('Verhindere, dass Westmopeds die Grenze überqueren –', W / 2, 292);
+  ctx.fillText('oder elektrifiziere sie.', W / 2, 312);
+
+  // ---- Schwalbe zentriert ----
+  drawSchwalbe(W / 2 - 22, 340);
+
+  // ---- Steuerung ----
+  ctx.fillStyle = C.gold + '55';
+  ctx.fillRect(60, 440, W - 120, 1);
+
+  ctx.font = font(700, 10);
+  ctx.fillStyle = C.gold;
+  ctx.letterSpacing = '2px';
+  ctx.fillText('STEUERUNG', W / 2, 462);
+  ctx.letterSpacing = '0px';
+
+  const controls = [
+    ['WASD / PFEILTASTEN', 'Bewegen'],
+    ['LEERTASTE',          'Schießen'],
+    ['LEERTASTE halten',   'Elektro-Schuss'],
+    ['P',                  'Pause'],
+  ];
+  ctx.font = font(400, 12);
+  controls.forEach(([key, desc], i) => {
+    const y = 482 + i * 20;
+    ctx.fillStyle = C.light + 'cc';
+    ctx.textAlign = 'right';
+    ctx.fillText(key, W / 2 - 10, y);
+    ctx.fillStyle = C.light + '55';
+    ctx.textAlign = 'left';
+    ctx.fillText(desc, W / 2 + 10, y);
+  });
+
+  ctx.fillStyle = C.gold + '55';
+  ctx.fillRect(60, 564, W - 120, 1);
+
+  // ---- CTA blink ----
+  ctx.textAlign = 'center';
+  if (Math.floor(Date.now() / 600) % 2 === 0) {
+    ctx.font = font(700, 13);
+    ctx.fillStyle = C.gold;
+    ctx.letterSpacing = '3px';
+    ctx.shadowColor = C.gold;
+    ctx.shadowBlur  = 10;
+    ctx.fillText('LEERTASTE ZUM STARTEN', W / 2, 598);
+    ctx.shadowBlur = 0;
+    ctx.letterSpacing = '0px';
+  }
+
+  // ---- Highscore ----
+  if (highScore > 0) {
+    ctx.font = font(400, 12);
+    ctx.fillStyle = C.light + '55';
+    ctx.fillText('HIGHSCORE  ' + String(highScore).padStart(5, '0'), W / 2, 636);
+  }
+}
+
+function drawPauseOverlay() {
+  ctx.fillStyle = 'rgba(5,5,5,0.90)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Layout-Konstanten
+  const CX  = W / 2;
+  const LX  = CX - 16;   // rechte Kante linke Spalte
+  const RX  = CX + 16;   // linke Kante rechte Spalte
+  const IH  = 20;        // einheitliche Icon-Hohe
+
+  // Hilfsfunktion: Abschnitts-Trennlinie
+  function divider(y, alpha) {
+    ctx.fillStyle = alpha ? C.gold + alpha : C.gold + '44';
+    ctx.fillRect(CX - 110, y, 220, 1);
+  }
+
+  // Hilfsfunktion: Abschnitts-Uberschrift
+  function sectionHeader(label, y) {
+    ctx.textAlign   = 'center';
+    ctx.font        = font(700, 10);
+    ctx.fillStyle   = C.gold;
+    ctx.letterSpacing = '2px';
+    ctx.fillText(label, CX, y);
+    ctx.letterSpacing = '0px';
+  }
+
+  // Hilfsfunktion: Inhaltszeile (links = Label, rechts = Beschreibung)
+  function row(left, right, y) {
+    ctx.font      = font(500, 12);
+    ctx.fillStyle = C.light + 'cc';
+    ctx.textAlign = 'right';
+    ctx.fillText(left, LX, y);
+    ctx.font      = font(400, 12);
+    ctx.fillStyle = C.light + '88';
+    ctx.textAlign = 'left';
+    ctx.fillText(right, RX, y);
+  }
+
+  let y = 26;
+
+  // ---- Titel ----
+  divider(y, 'ff'); y += 10;
+  ctx.textAlign = 'center';
+  ctx.font      = font(700, 34);
+  ctx.fillStyle = C.light;
+  y += 34;
+  ctx.fillText('PAUSE', CX, y);
+  y += 10;
+  divider(y, 'ff'); y += 22;
+
+  // ---- STEUERUNG ----
+  sectionHeader('STEUERUNG', y); y += 18;
+  [
+    ['WASD / PFEILTASTEN', 'Bewegen'],
+    ['LEERTASTE',          'Schießen'],
+    ['LEERTASTE halten',   '⚡ Elektro-Schuss'],
+    ['P',                  'Pause / Fortsetzen'],
+  ].forEach(([k, v]) => { row(k, v, y); y += 20; });
+  y += 8; divider(y); y += 20;
+
+  // ---- POWER-UPS ----
+  sectionHeader('POWER-UPS', y); y += 20;
+
+  // Icons + Text: rowY ist die vertikale Mitte der Zeile
+  const BIW    = 13;
+  const iconCX = LX - 10;
+
+  ctx.font = font(400, 12);
+  ctx.fillStyle = C.light + '88';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+
+  // Motor
+  let rowY = y;
+  drawMotorPowerup({ x: iconCX - IH / 2, y: rowY - IH / 2, w: IH, h: IH, type: 'mid50' });
+  ctx.fillText('Speedboost für 10 Sek.', RX, rowY);
+  y += 40;
+
+  // Akku
+  rowY = y;
+  drawBatteryPowerup({ x: iconCX - BIW / 2, y: rowY - IH / 2, w: BIW, h: IH, type: 'akku' });
+  ctx.fillText('Extra Schuss für 10 Sek.', RX, rowY);
+  y += 28;
+
+  ctx.textBaseline = 'alphabetic';
+
+  y += 8; divider(y); y += 20;
+
+  // ---- GEGNER ----
+  sectionHeader('GEGNER', y); y += 18;
+  [
+    ['VESPA',   'Standard'],
+    ['FLORETT', 'Schnell & klein'],
+    ['KS 50',   'Zickzack-Bewegung'],
+    ['KÄFER',   '2 Treffer nötig'],
+  ].forEach(([k, v]) => { row(k, v, y); y += 20; });
+  y += 8; divider(y); y += 20;
+
+  // ---- BONI ----
+  sectionHeader('BONI', y); y += 18;
+  row('15 Städte', '+1 Leben (max. 5)', y); y += 20;
+  row('5 Elektrifizierte', '+1 Leben (max. 5)', y);
+  y += 14;
+
+  divider(y, 'ff');
+
+  // ---- Footer ----
+  ctx.textAlign   = 'center';
+  ctx.font        = font(400, 10);
+  ctx.fillStyle   = C.mid + 'aa';
+  ctx.letterSpacing = '2px';
+  ctx.fillText('P  DRÜCKEN  ZUM  WEITERSPIELEN', CX, H - 14);
+  ctx.letterSpacing = '0px';
+}
+
+function drawGameOver() {
+  ctx.fillStyle = 'rgba(5,5,5,0.94)';
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.textAlign = 'center';
+
+  // ---- GAME OVER Titel mit Glow ----
+  ctx.font = font(700, 64);
+  ctx.fillStyle = C.light;
+  ctx.shadowColor = C.light;
+  ctx.shadowBlur  = 32;
+  ctx.fillText('GAME', W / 2, 170);
+  ctx.shadowBlur  = 14;
+  ctx.fillText('OVER', W / 2, 248);
+  ctx.shadowBlur  = 0;
+
+  // Trennlinie
+  ctx.fillStyle = C.gold;
+  ctx.fillRect(60, 270, W - 120, 2);
+
+  // ---- Spruch ----
+  ctx.font = font(400, 15);
+  ctx.fillStyle = C.light + 'bb';
+  ctx.fillText(gameOverQuote, W / 2, 300);
+
+  // ---- Score ----
+  ctx.font = font(700, 44);
+  ctx.fillStyle = C.gold;
+  ctx.shadowColor = C.gold;
+  ctx.shadowBlur  = 20;
+  ctx.fillText(String(score).padStart(5, '0'), W / 2, 370);
+  ctx.shadowBlur  = 0;
+
+  // Trennlinie
+  ctx.fillStyle = C.gold + '66';
+  ctx.fillRect(60, 390, W - 120, 1);
+
+  // ---- Stats ----
+  ctx.font = font(400, 13);
+  ctx.fillStyle = C.light + 'bb';
+  ctx.letterSpacing = '2px';
+  let statY = 420;
+  // Highscore nur zeigen wenn er nicht identisch mit dem aktuellen Score ist
+  if (highScore > score) {
+    ctx.fillText('HIGHSCORE  ' + String(highScore).padStart(5, '0'), W / 2, statY);
+    statY += 24;
+  }
+  if (elektroCount > 0) {
+    ctx.fillText('ELEKTRIFIZIERT  ' + String(elektroCount).padStart(5, '0'), W / 2, statY);
+    statY += 24;
+  }
+  ctx.letterSpacing = '0px';
+  if (currentCity) {
+    ctx.font = font(400, 12);
+    ctx.fillStyle = C.light + '55';
+    ctx.fillText('GESTRANDET IN: ' + currentCity.toUpperCase(), W / 2, statY);
+    statY += 24;
+  }
+  const round = Math.floor((currentLevel - 1) / eastGermanCities.length) + 1;
+  ctx.font = font(400, 12);
+  ctx.fillStyle = C.light + '55';
+  ctx.letterSpacing = '2px';
+  ctx.fillText('RUNDE: ' + round, W / 2, statY);
+  ctx.letterSpacing = '0px';
+  statY += 24;
+
+  // Trennlinie + CTA direkt unter dem Inhalt
+  statY += 16;
+  ctx.fillStyle = C.gold + '44';
+  ctx.fillRect(60, statY, W - 120, 1);
+
+  // ---- CTA blink ----
+  if (Math.floor(Date.now() / 600) % 2 === 0) {
+    ctx.font = font(700, 13);
+    ctx.fillStyle = C.gold;
+    ctx.shadowColor = C.gold;
+    ctx.shadowBlur  = 10;
+    ctx.letterSpacing = '3px';
+    ctx.fillText('ENTER ZUM NEUSTART', W / 2, statY + 30);
+    ctx.shadowBlur  = 0;
+    ctx.letterSpacing = '0px';
+  }
+}
+
+// ---- Minimap ----
+function drawMinimap() {
+  ctx.save();
+
+  // Kartenbild (transparent, kein Rahmen)
+  ctx.drawImage(mapImg, MM_X, MM_Y, MM_W, MM_H);
+
+  // Aktuellen Stadtpunkt einzeichnen
+  const pos = currentCity ? CITY_MAP_POS[currentCity] : CITY_MAP_POS['Ost-Berlin'];
+  if (pos) {
+    const dotX  = MM_X + pos[0] * MM_W;
+    const dotY  = MM_Y + pos[1] * MM_H;
+    const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 280);
+
+    // Aussenglow
+    ctx.shadowColor = '#ff2222';
+    ctx.shadowBlur  = 10 + pulse * 8;
+    ctx.fillStyle   = '#ff2222';
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, 7 + pulse * 1.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    // Weisser Kern
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(dotX, dotY, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+// ---- Draw frame ----
+
+function draw() {
+  if (state === 'start') { drawStartScreen(); return; }
+
+  drawBackground();
+  drawMinimap();
+  if (sign.active) drawOrtsschild(sign.x, sign.y, sign.city, sign.sw);
+  enemies.forEach(e => drawEnemy(e));
+  bullets.forEach(b => drawBolt(b.x, b.y, b.w, b.h, b.electro));
+  powerups.forEach(p => drawPowerup(p));
+
+  const blink = player.invincible > 0 && Math.floor(player.invincible / 120) % 2 === 0;
+  if (!blink) drawSchwalbe(player.x, player.y);
+
+  particles.forEach(p => {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+    ctx.globalAlpha = 1;
+  });
+
+  // Republikflucht-Nachrichten
+  eindringlingMessages.forEach(m => drawEindringling(m));
+  if (roundBonus)   drawRoundBonus(roundBonus);
+  if (elektroBonus) drawElektroBonus(elektroBonus);
+  drawHUD();
+  if (state === 'paused') drawPauseOverlay();
+  if (state === 'over')   drawGameOver();
+}
+
+// ---- Loop ----
+
+function loop(ts) {
+  update(ts);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
