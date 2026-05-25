@@ -259,7 +259,7 @@ let sign = { active: false, city: '', sw: 0, x: 0, y: 0, phase: 'idle', phaseTim
 // ---- Power-ups ----
 let powerups          = [];
 let powerupSpawnTimer = 0;
-const POWERUP_INTERVAL = 8500;
+let powerupInterval = 5500;
 let speedBoostTimer   = 0;
 let akkuCount         = 0;
 let akkuTimer         = 0;
@@ -489,6 +489,7 @@ function startGame() {
   sign.phase   = 'idle';
   powerups          = [];
   powerupSpawnTimer = 0;
+  powerupInterval   = 5500;
   speedBoostTimer   = 0;
   akkuCount         = 0;
   akkuTimer         = 0;
@@ -588,9 +589,10 @@ function update(ts) {
   diffTimer += dt * 1000;
   if (diffTimer >= 10000) {
     diffTimer = 0;
-    spawnInterval = Math.max(750, spawnInterval - 170);
-    enemyBaseSpeed = Math.min(400, enemyBaseSpeed + 18);
-    player.speed   = Math.min(480, player.speed + 8);
+    spawnInterval   = Math.max(750, spawnInterval - 170);
+    enemyBaseSpeed  = Math.min(380, enemyBaseSpeed + 12);
+    player.speed    = Math.min(480, player.speed + 8);
+    powerupInterval = Math.max(2500, powerupInterval - 300);
   }
 
   // ---- Level check ----
@@ -617,7 +619,7 @@ function update(ts) {
   }
 
   powerupSpawnTimer += dt * 1000;
-  if (powerupSpawnTimer >= POWERUP_INTERVAL) {
+  if (powerupSpawnTimer >= powerupInterval) {
     powerupSpawnTimer = 0;
     const margin = 40;
     const type = Math.random() < 0.5 ? 'mid50' : 'akku';
